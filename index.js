@@ -29,7 +29,7 @@ async function sendToWati(phone, messageText) {
       Authorization: WATI_TOKEN,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ messageText }),
+    body: JSON.stringify({ text: messageText }),
   });
 
   const body = await r.text();
