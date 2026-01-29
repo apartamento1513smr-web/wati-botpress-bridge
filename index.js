@@ -62,20 +62,16 @@ app.post("/botpress", async (req, res) => {
 
     const url = `https://app.wati.io/${WATI_TENANT_ID}/api/v1/sendSessionMessage/${phone}`;
 
-    await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${WATI_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ messageText: text })
-    });
-
-    res.sendStatus(200);
-  } catch (e) {
-    console.log(e);
-    res.sendStatus(200);
-  }
+  await fetch(`${BOTPRESS_URL}`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({
+    conversationId,
+    type: "text",
+    text
+  })
 });
 
 const PORT = process.env.PORT || 3000;
