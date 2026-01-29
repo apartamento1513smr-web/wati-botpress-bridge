@@ -6,64 +6,134 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-const BOTPRESS_URL = process.env.BOTPRESS_URL;          // Ej: https://webhook.botpress.cloud/xxxxx
-const WATI_TENANT_ID = process.env.WATI_TENANT_ID;      // Ej: 1085564
-const WATI_TOKEN = process.env.WATI_TOKEN;              // Ej: Bearer eyJhbGci...
+const BOTPRESS_URL = process.env.BOTPRESS_URL;      // puede venir como https://webhook.botpress.cloud/<id>
+const WATI_TENANT_ID = process.env.WATI_TENANT_ID;  // número tenant (ej: 1085564)
+const WATI_TOKEN = process.env.WATI_TOKEN;          // ideal: "Bearer eyJ..." (tal cual te lo da WATI)
 
+// Safety checks
 if (!BOTPRESS_URL) throw new Error("Missing BOTPRESS_URL");
 if (!WATI_TENANT_ID) throw new Error("Missing WATI_TENANT_ID");
 if (!WATI_TOKEN) throw new Error("Missing WATI_TOKEN");
 
-// Base correcto para WATI (según tu UI: https://live-mt-server.wati.io/{tenantId})
-const WATI_BASE = `https://live-mt-server.wati.io/${WATI_TENANT_ID}`;
+// ---- Botpress Chat API base (para ENVIAR mensajes al bot) ----
+// Chat API usa https://chat.botpress.cloud/{webhookUrl}/messages :contentReference[oaicite:1]{index=1}
+function getBotpressBaseUrl() {
+  const parts = String(BOTPRESS_URL).split("/").filter(Boolean);
+  const webhookId = parts[parts.length - 1]; // el UUID final
+  return `https://chat.botpress.cloud/${webhookId}`;
+}
 
-// Utilidad: envía mensaje por WATI (NUNCA vacío)
-async function sendWatiText(phone, text) {
-  const safe = (text ?? "").toString().trim();
-  const messageText = safe.length ? safe : "Gracias por tu mensaje 😊";
+const BP_BASE = getBotpressBaseUrl();
 
-  const url = `${WATI_BASE}/api/v1/sendSessionMessage/${encodeURIComponent(phone)}`;
+// cache simple (en Render free se puede reiniciar, no pasa nada)
+const conversationCache = new Map(); // phone -> conversationId
 
-  const resp = await fetch(url, {
+async function getOrCreateConversation(phone) {
+  if (conversationCache.has(phone)) return conversationCache.get(phone);
+
+  // 1) getOrCreateUser
+  // Endpoint de Chat API (docs): getOrCreateUser :contentReference[oaicite:2]{index=2}
+  await fetch(`${BP_BASE}/users/get-or-create`, {
     method: "POST",
     headers: {
-      Authorization: WATI_TOKEN, // déjalo tal cual lo copiaste (incluye Bearer)
       "Content-Type": "application/json",
-      Accept: "application/json",
+      "x-user-key": phone
     },
-    body: JSON.stringify({ messageText }),
+    body: JSON.stringify({}) // no necesita nada para “get-or-create”
   });
 
-  const raw = await resp.text();
-  let json;
-  try { json = JSON.parse(raw); } catch { json = { raw }; }
+  // 2) getOrCreateConversation
+  // Endpoint de Chat API: getOrCreateConversation :contentReference[oaicite:3]{index=3}
+  const convRes = await fetch(`${BP_BASE}/conversations/get-or-create`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-key": phone
+    },
+    body: JSON.stringify({})
+  });
 
-  console.log("WATI send:", resp.status, json);
-  return { status: resp.status, data: json };
+  const convData = await convRes.json();
+  const conversationId =
+    convData?.conversation?.id ||
+    convData?.conversationId ||
+    convData?.id;
+
+  if (!conversationId) {
+    throw new Error("Could not get conversationId from Botpress");
+  }
+
+  conversationCache.set(phone, conversationId);
+  return conversationId;
+}
+
+async function sendToBotpress(phone, text) {
+  const conversationId = await getOrCreateConversation(phone);
+
+  // createMessage (Chat API): POST https://chat.botpress.cloud/{webhookUrl}/messages :contentReference[oaicite:4]{index=4}
+  const resp = await fetch(`${BP_BASE}/messages`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-key": phone
+    },
+    body: JSON.stringify({
+      conversationId,
+      payload: {
+        type: "text",
+        text
+      }
+    })
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Botpress createMessage failed: ${resp.status} ${t}`);
+  }
+}
+
+// ---- WATI sender ----
+async function sendToWati(phone, messageText) {
+  const text = (messageText ?? "").toString().trim();
+  if (!text) {
+    console.log("Skipping WATI send: empty messageText");
+    return;
+  }
+
+  const watiRes = await fetch(
+    `https://live-mt-server.wati.io/${WATI_TENANT_ID}/api/v1/sendSessionMessage`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: WATI_TOKEN,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        whatsappNumber: phone,
+        messageText: text
+      })
+    }
+  );
+
+  const watiData = await watiRes.json().catch(() => null);
+  console.log("WATI send:", watiRes.status, watiData || "(no json)");
 }
 
 // Health check
 app.get("/health", (req, res) => res.send("OK"));
 
-// 1) WATI -> Botpress -> WATI
+// 1) Receive from WATI -> send to Botpress (NO respondemos a WATI aquí)
 app.post("/wati", async (req, res) => {
   try {
-    // WATI "Message Received" puede variar por versión/plan.
-    // Capturamos varios posibles campos:
     const text =
-      req.body?.message?.text ??
-      req.body?.message?.body ??
-      req.body?.text ??
-      req.body?.body ??
-      req.body?.data?.message?.text ??
-      req.body?.data?.text;
+      req.body?.message?.text ||
+      req.body?.text ||
+      req.body?.message?.body;
 
     const phone =
-      req.body?.waId ??
-      req.body?.whatsappNumber ??
-      req.body?.contact?.waId ??
-      req.body?.data?.waId ??
-      req.body?.data?.whatsappNumber;
+      req.body?.waId ||
+      req.body?.whatsappNumber ||
+      req.body?.contact?.waId;
 
     if (!text || !phone) {
       console.log("Invalid payload from WATI:", JSON.stringify(req.body));
@@ -72,63 +142,38 @@ app.post("/wati", async (req, res) => {
 
     console.log("From WATI:", phone, "text:", text);
 
-    // Enviar a Botpress
-    const botpressRes = await fetch(BOTPRESS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        conversationId: phone,
-        type: "text",
-        text: text
-      })
-    });
-
-    const botpressRaw = await botpressRes.text();
-    let botpressData;
-    try { botpressData = JSON.parse(botpressRaw); } catch { botpressData = { raw: botpressRaw }; }
-
-    console.log("Botpress status:", botpressRes.status);
-    // IMPORTANTE: deja este log mientras pruebas para ver el formato real
-    console.log("Botpress response:", botpressData);
-
-    // Extraer respuesta (varios formatos posibles)
-    let reply =
-      botpressData?.responses?.[0]?.payload?.text ??
-      botpressData?.responses?.[0]?.text ??
-      botpressData?.messages?.[0]?.payload?.text ??
-      botpressData?.messages?.[0]?.text ??
-      botpressData?.payload?.text ??
-      botpressData?.text;
-
-    reply = (reply ?? "").toString().trim();
-    if (!reply) reply = "Gracias por tu mensaje 😊";
-
-    // Enviar respuesta a WATI
-    await sendWatiText(phone, reply);
+    await sendToBotpress(phone, text);
 
     return res.sendStatus(200);
   } catch (err) {
-    console.error("Bridge error:", err);
+    console.error("WATI -> Botpress error:", err);
     return res.sendStatus(500);
   }
 });
 
-// 2) Botpress -> WATI (si decides usar este camino también)
+// 2) Receive from Botpress -> send to WATI (AQUÍ sí enviamos la respuesta al cliente)
 app.post("/botpress", async (req, res) => {
   try {
     const phone = req.body?.conversationId;
-    const text = req.body?.payload?.text ?? req.body?.text;
+    const text = req.body?.payload?.text;
 
-    if (!phone) return res.sendStatus(200);
+    if (!phone || !text) {
+      console.log("Invalid payload from Botpress:", JSON.stringify(req.body));
+      return res.sendStatus(200);
+    }
 
-    const reply = (text ?? "").toString().trim();
-    await sendWatiText(phone, reply);
+    console.log("From Botpress:", phone, "text:", text);
+
+    await sendToWati(phone, text);
 
     return res.sendStatus(200);
   } catch (err) {
-    console.error("Botpress->WATI error:", err);
+    console.error("Botpress -> WATI error:", err);
     return res.sendStatus(500);
   }
 });
 
-app.listen(PORT, () => console.log("Server running on port", PORT));
+app.listen(PORT, () => {
+  console.log("Server running on port", PORT);
+  console.log("Botpress base:", BP_BASE);
+});
