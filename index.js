@@ -38,7 +38,7 @@ function normalizePhone(phone) {
 }
 
 const WEBHOOK_ID = extractWebhookId(BOTPRESS_URL);
-const BP_CHAT_BASE = `https://chat.botpress.cloud/webhook/${WEBHOOK_ID}`;
+const BP_CHAT_BASE = `https://chat.botpress.cloud/44c68c71-341a-4a69-9da7-827e59b377ec/${WEBHOOK_ID}`;
 
 // Health check
 app.get("/health", (req, res) => res.send("OK"));
