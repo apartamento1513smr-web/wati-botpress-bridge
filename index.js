@@ -149,3 +149,6 @@ app.post("/botpress", async (req, res) => {
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
+
+console.log("Incoming /botpress:", JSON.stringify(req.body));
+
