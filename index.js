@@ -145,10 +145,11 @@ app.post("/botpress", async (req, res) => {
   } catch (err) {
     console.error("Botpress->WATI error:", err);
     res.sendStatus(500);
+    console.log("Incoming /botpress:", JSON.stringify(req.body));
   }
 });
 
 app.listen(PORT, () => console.log("Server running on port", PORT));
 
-console.log("Incoming /botpress:", JSON.stringify(req.body));
+
 
